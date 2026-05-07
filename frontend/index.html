@@ -365,8 +365,8 @@
 
     <div>
       <div class="section-label">Output Folder</div>
-      <label>Where to put sorted files</label>
-      <input type="text" id="output-dir" placeholder="e.g. /Users/you/Sorted Files">
+      <label>Where to put sorted files (Optional)</label>
+      <input type="text" id="output-dir" placeholder="Leave blank for auto 'sorted' folder">
     </div>
 
     <div class="quotes-section" style="padding: 16px 0; min-height: 80px; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); font-style: italic; transition: opacity 0.5s;" id="quote-container">
@@ -506,7 +506,13 @@ async function browseNativeFiles() {
 function addFiles(fileList) {
   for (const f of fileList) {
     if (!pendingFiles.find(p => p.path === f.path || p.name === f.name)) {
-      pendingFiles.push({ name: f.name, path: f.path || f.name, status: 'pending', result: null });
+      pendingFiles.push({ 
+        name: f.name, 
+        path: f.path || f.name, 
+        status: 'pending', 
+        result: null,
+        domId: `fitem-${Math.random().toString(36).substr(2, 9)}`
+      });
     }
   }
   renderFileList();
@@ -543,6 +549,13 @@ function fileIcon(name) {
   return extIcons[ext] || extIcons.default;
 }
 
+function getCategoryString(f) {
+  if (f.status === 'done' && f.result && f.result.category) {
+    return f.result.category;
+  }
+  return '~pending';
+}
+
 function renderFileList() {
   const list = document.getElementById('file-list');
   const title = document.getElementById('list-title');
@@ -557,8 +570,35 @@ function renderFileList() {
     return;
   }
 
+  const emptyState = list.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+
   title.textContent = `${pendingFiles.length} Files`;
-  list.innerHTML = pendingFiles.map((f, i) => {
+
+  // 1. Record current positions (First)
+  const positions = {};
+  pendingFiles.forEach((f) => {
+    if (!f.domId) f.domId = `fitem-${Math.random().toString(36).substr(2, 9)}`;
+    const el = document.getElementById(f.domId);
+    if (el) {
+      positions[f.domId] = el.getBoundingClientRect().top;
+    }
+  });
+
+  // 2. Sort pendingFiles by Category, then alphabetically by name
+  pendingFiles.sort((a, b) => {
+    const catA = getCategoryString(a);
+    const catB = getCategoryString(b);
+    if (catA !== catB) {
+       return catA.localeCompare(catB);
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+  // 3. Reorder DOM and update content (Last)
+  pendingFiles.forEach((f, index) => {
+    let el = document.getElementById(f.domId);
+    
     const badgeClass = `badge-${f.status}`;
     const itemClass = f.status === 'done' ? 'done' : f.status === 'error' ? 'error' : f.status === 'classifying' || f.status === 'reading' ? 'processing' : '';
     const badgeText = {
@@ -569,15 +609,49 @@ function renderFileList() {
       error: '✗ error'
     }[f.status] || f.status;
 
-    return `<div class="file-item ${itemClass}" id="fitem-${i}">
+    const htmlContent = `
       <div class="file-icon">${fileIcon(f.name)}</div>
       <div class="file-info">
         <div class="name">${escHtml(f.name)}</div>
         ${f.result?.reason ? `<div class="path">${escHtml(f.result.reason)}</div>` : ''}
       </div>
       <div class="file-badge ${badgeClass}">${badgeText}</div>
-    </div>`;
-  }).join('');
+    `;
+
+    if (!el) {
+      el = document.createElement('div');
+      el.id = f.domId;
+      el.className = `file-item ${itemClass}`;
+      el.innerHTML = htmlContent;
+      list.appendChild(el);
+    } else {
+      el.className = `file-item ${itemClass}`;
+      el.innerHTML = htmlContent;
+      if (list.children[index] !== el) {
+        list.insertBefore(el, list.children[index]);
+      }
+    }
+  });
+
+  // 4. Invert and Play (FLIP Animation)
+  pendingFiles.forEach((f) => {
+    const el = document.getElementById(f.domId);
+    if (el && positions[f.domId] !== undefined) {
+      const newTop = el.getBoundingClientRect().top;
+      const delta = positions[f.domId] - newTop;
+      
+      if (delta !== 0) {
+        el.style.transform = `translateY(${delta}px)`;
+        el.style.transition = 'none';
+        
+        requestAnimationFrame(() => {
+          el.getBoundingClientRect(); // Force reflow
+          el.style.transform = '';
+          el.style.transition = 'transform 0.9s cubic-bezier(0.22, 1, 0.36, 1)'; // floaty ease-out
+        });
+      }
+    }
+  });
 }
 
 function buildPath(r) {
@@ -600,7 +674,6 @@ async function startSort() {
   const usingFolder = folderPath && pendingFiles.length === 0;
 
   if (pendingFiles.length === 0 && !folderPath) return showError('Add files or paste a folder path first.');
-  if (!outputDir) return showError('Please specify an output folder.');
 
   // Reset statuses
   pendingFiles.forEach(f => { f.status = 'pending'; f.result = null; });
@@ -714,11 +787,15 @@ function showResults(job) {
     .map(([cat, count]) => `<div class="chip">${escHtml(cat)} <span>${count}</span></div>`)
     .join('');
 
+  if (job.output_dir) {
+    document.getElementById('output-dir').value = job.output_dir;
+  }
+
   document.getElementById('results-summary').classList.add('visible');
 }
 
 async function openOutputDir() {
-  const dir = document.getElementById('output-dir').value;
+  const dir = document.getElementById('output-dir').value.trim();
   if (!dir) return;
   try {
     const res = await fetch('/api/open-folder', {
@@ -727,9 +804,11 @@ async function openOutputDir() {
       body: JSON.stringify({ path: dir })
     });
     const data = await res.json();
-    if (data.error) showError("Could not open folder: " + data.error);
-  } catch (e) {
-    showError("Failed to request opening folder.");
+    if (data.error) {
+      alert("Could not open folder: " + data.error);
+    }
+  } catch (err) {
+    console.error("Failed to open folder", err);
   }
 }
 
@@ -775,6 +854,11 @@ setInterval(() => {
     container.style.opacity = 1;
   }, 500);
 }, 5000);
+
+// ── Watchdog Ping ──────────────────────────────────────────────────────────
+setInterval(() => {
+  fetch('/api/ping', { method: 'POST' }).catch(() => {});
+}, 3000);
 
 // ── Init ───────────────────────────────────────────────────────────────────
 checkOllama();

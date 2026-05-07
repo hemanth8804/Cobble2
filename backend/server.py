@@ -73,8 +73,17 @@ def start_sort():
 
     if not files:
         return jsonify({"error": "No files provided"}), 400
+
     if not output_dir:
-        return jsonify({"error": "No output directory provided"}), 400
+        if folder_path and os.path.isdir(folder_path):
+            output_dir = os.path.join(os.path.abspath(folder_path), "sorted")
+        else:
+            parent_dirs = {os.path.dirname(os.path.abspath(f)) for f in files}
+            if len(parent_dirs) == 1:
+                output_dir = os.path.join(parent_dirs.pop(), "sorted")
+            else:
+                desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+                output_dir = os.path.join(desktop, "sorted")
 
     # Validate paths exist
     missing = [f for f in files if not os.path.exists(f)]
@@ -90,6 +99,7 @@ def start_sort():
             "status": "running",
             "total": len(files),
             "done": 0,
+            "output_dir": output_dir,
             "current_file": None,
             "current_status": None,
             "results": [],
@@ -162,28 +172,6 @@ def select_files():
     return jsonify({"files": list(file_paths)})
 
 
-@app.route("/api/open-folder", methods=["POST"])
-def open_folder():
-    """Open a folder in the native OS file explorer."""
-    body = request.json or {}
-    folder_path = body.get("path", "")
-    if not folder_path or not os.path.exists(folder_path):
-        return jsonify({"error": "Folder not found"}), 404
-        
-    import platform
-    import subprocess
-    try:
-        if platform.system() == "Windows":
-            os.startfile(folder_path)
-        elif platform.system() == "Darwin":
-            subprocess.Popen(["open", folder_path])
-        else:
-            subprocess.Popen(["xdg-open", folder_path])
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/preview", methods=["POST"])
 def preview_file():
     """Get a text preview of a file (for UI display)."""
@@ -195,10 +183,55 @@ def preview_file():
     return jsonify({"preview": text})
 
 
+@app.route("/api/open-folder", methods=["POST"])
+def open_folder():
+    """Open a folder natively in the OS file explorer."""
+    body = request.json or {}
+    folder_path = body.get("path", "")
+    if folder_path and os.path.exists(folder_path):
+        try:
+            if sys.platform == "win32":
+                os.startfile(folder_path)
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", folder_path])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", folder_path])
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Folder not found"}), 404
+
+
+# ── Watchdog ──────────────────────────────────────────────────────────────────
+last_ping_time = time.time()
+
+@app.route("/api/ping", methods=["POST"])
+def ping():
+    global last_ping_time
+    last_ping_time = time.time()
+    return jsonify({"ok": True})
+
+def watchdog():
+    global last_ping_time
+    # 15 second grace period on startup for browser to launch
+    time.sleep(15)
+    while True:
+        time.sleep(2)
+        # If no ping received in the last 6 seconds, the UI was closed
+        if time.time() - last_ping_time > 6:
+            import os
+            os._exit(0)
+
 if __name__ == "__main__":
     import webbrowser
     port = 7432
     print(f"\n🗂  AI File Sorter starting...")
     print(f"   Opening at: http://localhost:{port}\n")
+    
+    # Start the watchdog to terminate when UI is closed
+    threading.Thread(target=watchdog, daemon=True).start()
+    
     threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{port}")).start()
     app.run(host="0.0.0.0", port=port, debug=False)
